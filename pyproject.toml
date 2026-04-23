@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-  { name = "Andi" }
+  { name = "Andreas Fellnhofer" }
 ]
 keywords = ["clockify", "cli", "api", "time-tracking"]
 classifiers = [
