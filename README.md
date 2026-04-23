@@ -8,7 +8,7 @@ It installs a shell command named `workipy` via `project.scripts`, so after inst
 
 - Zero runtime dependencies
 - Reads the API key from `CLOCKIFY_API_KEY`
-- Calculates target hours, worked hours, and absences for a date range
+- Calculates target hours, worked hours, public holiday bookings, and absences for a date range
 - Fetches Austrian public holidays from `nager.date`
 - Warns when `Public Holiday` bookings do not match nominal hours on a holiday
 - Supports direct invocation like `workipy "Max Testerman" 01-01-2026 31-01-2026 5 5 5 5 0`
@@ -80,6 +80,7 @@ Vacation: 10 h
 Sick leave: 0 h
 Special leave: 2 h
 Public holidays deducted: 10 h
+Public holidays logged:   4 h
 Credited hours: 92 h
 Extra hours: 6 h
 Warnings:

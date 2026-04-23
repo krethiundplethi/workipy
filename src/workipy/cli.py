@@ -608,8 +608,9 @@ def compute_work_summary(
         + entry_totals["vacation_hours"]
         + entry_totals["sick_leave_hours"]
         + entry_totals["special_leave_hours"]
+        + public_holiday_credit
     )
-    balance_hours = credited_hours - target_hours
+    balance_hours = credited_hours - scheduled_hours
     summary = WorkSummary(
         scheduled_hours=round_hours(scheduled_hours),
         public_holiday_credit=round_hours(public_holiday_credit),
@@ -649,7 +650,7 @@ def print_work_summary(
     print(f"Special leave: {format_hours(summary.special_leave_hours)}")
     print(f"Public holidays deducted: {format_hours(summary.public_holiday_credit)}")
     if summary.public_holiday_logged_hours:
-        print(f"Public holiday logged in Clockify: {format_hours(summary.public_holiday_logged_hours)}")
+        print(f"Public holidays logged:   {format_hours(summary.public_holiday_logged_hours)}")
     print(f"Credited hours: {format_hours(summary.credited_hours)}")
     if summary.balance_hours >= 0:
         print(f"Extra hours: {format_hours(summary.balance_hours)}")

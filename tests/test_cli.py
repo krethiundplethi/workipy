@@ -118,7 +118,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(summary.sick_leave_hours, 5.0)
         self.assertEqual(summary.special_leave_hours, 0.0)
         self.assertEqual(summary.public_holiday_logged_hours, 5.0)
-        self.assertEqual(summary.credited_hours, 15.0)
+        self.assertEqual(summary.credited_hours, 20.0)
         self.assertEqual(summary.balance_hours, 0.0)
         self.assertEqual(warnings, [])
 
