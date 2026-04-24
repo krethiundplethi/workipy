@@ -1,14 +1,23 @@
 import unittest
 from datetime import date
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 from workipy.cli import (
+    DEFAULT_BASE_URL,
+    DEFAULT_REQUEST_TIMEOUT_SECONDS,
     PublicHoliday,
     WorkSchedule,
     build_parser,
     build_url,
     compute_work_summary,
     parse_european_date,
+    perform_public_json_request,
+    perform_request,
+    require_api_key,
+    validate_clockify_base_url,
 )
 
 
@@ -34,9 +43,88 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.user, "Max Testerman")
+        self.assertFalse(args.allow_costum_base_url)
+        self.assertIsNone(args.api_key_file)
+
+    def test_require_api_key_reads_key_from_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            key_file = Path(tmpdir) / "clockify.key"
+            key_file.write_text("secret-key\n", encoding="utf-8")
+            self.assertEqual(require_api_key(str(key_file)), "secret-key")
+
+    def test_require_api_key_rejects_missing_file(self) -> None:
+        with self.assertRaises(SystemExit) as exc:
+            require_api_key("/tmp/does-not-exist-clockify-key")
+        self.assertIn("Unable to read API key file", str(exc.exception))
+
+    def test_require_api_key_rejects_empty_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            key_file = Path(tmpdir) / "clockify.key"
+            key_file.write_text(" \n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as exc:
+                require_api_key(str(key_file))
+        self.assertIn("is empty", str(exc.exception))
+
+    def test_validate_clockify_base_url_accepts_default_url(self) -> None:
+        self.assertEqual(
+            validate_clockify_base_url(DEFAULT_BASE_URL, allow_costum_base_url=False),
+            DEFAULT_BASE_URL,
+        )
+
+    def test_validate_clockify_base_url_rejects_custom_url_without_flag(self) -> None:
+        with self.assertRaises(SystemExit) as exc:
+            validate_clockify_base_url(
+                "https://example.com/api",
+                allow_costum_base_url=False,
+            )
+        self.assertEqual(
+            str(exc.exception),
+            "Custom Clockify base URLs are disabled. Use "
+            "--allow-costum-base-url to override the default API endpoint.",
+        )
+
+    def test_validate_clockify_base_url_accepts_custom_https_url_with_flag(self) -> None:
+        self.assertEqual(
+            validate_clockify_base_url(
+                "https://example.com/api/",
+                allow_costum_base_url=True,
+            ),
+            "https://example.com/api",
+        )
+
+    def test_validate_clockify_base_url_rejects_non_https_url_even_with_flag(self) -> None:
+        with self.assertRaises(SystemExit) as exc:
+            validate_clockify_base_url(
+                "http://example.com/api",
+                allow_costum_base_url=True,
+            )
+        self.assertEqual(str(exc.exception), "Clockify base URL must use HTTPS.")
 
     def test_parse_european_date(self) -> None:
         self.assertEqual(parse_european_date("31-01-2026"), date(2026, 1, 31))
+
+    def test_perform_request_uses_timeout(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.status = 200
+        response.__enter__.return_value.read.return_value = b'{"ok": true}'
+        with mock.patch("workipy.cli.urllib.request.urlopen", return_value=response) as urlopen:
+            status, payload = perform_request(
+                api_key="secret",
+                base_url=DEFAULT_BASE_URL,
+                method="GET",
+                path="/workspaces",
+            )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, '{"ok": true}')
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], DEFAULT_REQUEST_TIMEOUT_SECONDS)
+
+    def test_perform_public_json_request_uses_timeout(self) -> None:
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"ok": true}'
+        with mock.patch("workipy.cli.urllib.request.urlopen", return_value=response) as urlopen:
+            payload = perform_public_json_request("https://example.com/holidays")
+        self.assertEqual(payload, {"ok": True})
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], DEFAULT_REQUEST_TIMEOUT_SECONDS)
 
     def test_summary_uses_passed_public_holidays_for_target_hours(self) -> None:
         schedule = WorkSchedule(5, 5, 5, 5, 0)

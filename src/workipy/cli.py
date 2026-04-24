@@ -22,6 +22,7 @@ HOLIDAY_TASK_NAME = "Public Holiday"
 SICK_LEAVE_TASK_NAME = "Sick-Leave"
 SPECIAL_LEAVE_TASK_NAME = "Special Leave"
 VACATION_TASK_NAME = "Vacation"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -74,14 +75,19 @@ def build_parser() -> argparse.ArgumentParser:
         description="Clockify work time summary with Austrian part-time rules.",
     )
     parser.add_argument(
-        "--api-key",
-        default=os.getenv("CLOCKIFY_API_KEY"),
-        help="Clockify API key. Defaults to CLOCKIFY_API_KEY.",
+        "--api-key-file",
+        default=os.getenv("CLOCKIFY_API_KEY_FILE"),
+        help="Path to a file containing the Clockify API key. Defaults to CLOCKIFY_API_KEY_FILE.",
     )
     parser.add_argument(
         "--base-url",
         default=os.getenv("CLOCKIFY_BASE_URL", DEFAULT_BASE_URL),
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--allow-costum-base-url",
+        action="store_true",
+        help="Allow a custom Clockify base URL. Only HTTPS URLs are accepted.",
     )
     parser.add_argument("user", help='Clockify user display name, for example "Max Testerman".')
     parser.add_argument("start", help="Start date in DD-MM-YYYY format.")
@@ -112,10 +118,37 @@ def normalize_argv(argv: list[str] | None) -> list[str]:
     return argv if argv is not None else sys.argv[1:]
 
 
-def require_api_key(api_key: str | None) -> str:
-    if api_key:
-        return api_key
-    raise SystemExit("Missing API key. Set CLOCKIFY_API_KEY or pass --api-key.")
+def require_api_key(api_key_file: str | None) -> str:
+    if not api_key_file:
+        raise SystemExit("Missing API key file. Set CLOCKIFY_API_KEY_FILE or pass --api-key-file.")
+
+    try:
+        with open(api_key_file, encoding="utf-8") as handle:
+            api_key = handle.read().strip()
+    except OSError as exc:
+        raise SystemExit(f"Unable to read API key file '{api_key_file}': {exc.strerror}.") from exc
+
+    if not api_key:
+        raise SystemExit(f"API key file '{api_key_file}' is empty.")
+
+    return api_key
+
+
+def validate_clockify_base_url(base_url: str, *, allow_costum_base_url: bool) -> str:
+    normalized_base_url = base_url.rstrip("/")
+    parsed = urllib.parse.urlparse(normalized_base_url)
+
+    if parsed.scheme != "https":
+        raise SystemExit("Clockify base URL must use HTTPS.")
+    if not parsed.netloc:
+        raise SystemExit("Clockify base URL must be an absolute HTTPS URL.")
+    if not allow_costum_base_url and normalized_base_url != DEFAULT_BASE_URL:
+        raise SystemExit(
+            "Custom Clockify base URLs are disabled. Use "
+            "--allow-costum-base-url to override the default API endpoint."
+        )
+
+    return normalized_base_url
 
 
 def parse_european_date(raw_value: str) -> date:
@@ -171,7 +204,7 @@ def perform_request(
     )
 
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS) as response:
             payload = response.read().decode("utf-8")
             return response.status, payload
     except urllib.error.HTTPError as exc:
@@ -211,7 +244,7 @@ def perform_public_json_request(url: str) -> Any:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS) as response:
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="replace")
@@ -663,7 +696,11 @@ def print_work_summary(
 
 
 def handle_balance_command(args: argparse.Namespace) -> int:
-    api_key = require_api_key(args.api_key)
+    api_key = require_api_key(args.api_key_file)
+    base_url = validate_clockify_base_url(
+        args.base_url,
+        allow_costum_base_url=args.allow_costum_base_url,
+    )
     start_date = parse_european_date(args.start)
     end_date = parse_european_date(args.end)
     if end_date < start_date:
@@ -679,7 +716,7 @@ def handle_balance_command(args: argparse.Namespace) -> int:
 
     workspace = find_workspace(
         api_key=api_key,
-        base_url=args.base_url,
+        base_url=base_url,
         workspace_id=args.workspace_id,
         workspace_name=args.workspace_name,
         user_name=args.user,
@@ -687,20 +724,20 @@ def handle_balance_command(args: argparse.Namespace) -> int:
     workspace_id = workspace["id"]
     user = find_user(
         api_key=api_key,
-        base_url=args.base_url,
+        base_url=base_url,
         workspace_id=workspace_id,
         user_name=args.user,
     )
     workspace_details = fetch_workspace_details(
         api_key=api_key,
-        base_url=args.base_url,
+        base_url=base_url,
         workspace_id=workspace_id,
     )
     timezone = get_timezone(workspace_details.get("timeZone") or workspace_details.get("workspaceSettings", {}).get("timeZone"))
 
     out_of_office_project = find_project_by_name(
         api_key=api_key,
-        base_url=args.base_url,
+        base_url=base_url,
         workspace_id=workspace_id,
         project_name=args.out_of_office_project,
     )
@@ -708,14 +745,14 @@ def handle_balance_command(args: argparse.Namespace) -> int:
     if out_of_office_project is not None:
         task_names = fetch_tasks_for_project(
             api_key=api_key,
-            base_url=args.base_url,
+            base_url=base_url,
             workspace_id=workspace_id,
             project_id=out_of_office_project["id"],
         )
 
     entries = fetch_time_entries(
         api_key=api_key,
-        base_url=args.base_url,
+        base_url=base_url,
         workspace_id=workspace_id,
         user_id=user["id"],
         start_date=start_date,

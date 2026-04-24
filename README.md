@@ -7,7 +7,7 @@ It installs a shell command named `workipy` via `project.scripts`, so after inst
 ## Features
 
 - Zero runtime dependencies
-- Reads the API key from `CLOCKIFY_API_KEY`
+- Reads the API key from a file configured via `CLOCKIFY_API_KEY_FILE`
 - Calculates target hours, worked hours, public holiday bookings, and absences for a date range
 - Fetches Austrian public holidays from `nager.date`
 - Warns when `Public Holiday` bookings do not match nominal hours on a holiday
@@ -21,10 +21,12 @@ python -m pip install .
 
 ## Configure
 
-Set your Clockify API key:
+Set your Clockify API key file:
 
 ```bash
-export CLOCKIFY_API_KEY="your-api-key"
+printf '%s\n' 'your-api-key' > ~/.clockify-api-key
+chmod 600 ~/.clockify-api-key
+export CLOCKIFY_API_KEY_FILE="$HOME/.clockify-api-key"
 ```
 
 ## Clockify Mapping
