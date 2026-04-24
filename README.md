@@ -24,8 +24,8 @@ python -m pip install .
 Set your Clockify API key file:
 
 ```bash
+umask 077
 printf '%s\n' 'your-api-key' > ~/.clockify-api-key
-chmod 600 ~/.clockify-api-key
 export CLOCKIFY_API_KEY_FILE="$HOME/.clockify-api-key"
 ```
 

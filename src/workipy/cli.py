@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import urllib.error
 import urllib.parse
@@ -24,6 +25,13 @@ SPECIAL_LEAVE_TASK_NAME = "Special Leave"
 VACATION_TASK_NAME = "Vacation"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
 MAX_ERROR_PAYLOAD_CHARS = 4096
+MAX_API_KEY_FILE_BYTES = 4096
+MAX_RESPONSE_PAYLOAD_CHARS = 1_048_576
+MAX_WORKSPACES = 200
+MAX_USERS = 5_000
+MAX_PROJECTS = 5_000
+MAX_TASKS = 10_000
+MAX_TIME_ENTRIES = 100_000
 
 
 @dataclass(frozen=True)
@@ -124,11 +132,31 @@ def require_api_key(api_key_file: str | None) -> str:
         raise SystemExit("Missing API key file. Set CLOCKIFY_API_KEY_FILE or pass --api-key-file.")
 
     try:
-        with open(api_key_file, encoding="utf-8") as handle:
-            api_key = handle.read().strip()
+        file_stat = os.stat(api_key_file)
     except OSError as exc:
         raise SystemExit(f"Unable to read API key file '{api_key_file}': {exc.strerror}.") from exc
 
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise SystemExit(f"API key file '{api_key_file}' must be a regular file.")
+    if file_stat.st_mode & 0o077:
+        raise SystemExit(
+            f"API key file '{api_key_file}' must not be accessible by group or others."
+        )
+    if file_stat.st_size > MAX_API_KEY_FILE_BYTES:
+        raise SystemExit(
+            f"API key file '{api_key_file}' exceeds the {MAX_API_KEY_FILE_BYTES}-byte limit."
+        )
+
+    try:
+        with open(api_key_file, encoding="utf-8") as handle:
+            api_key = handle.read(MAX_API_KEY_FILE_BYTES + 1).strip()
+    except OSError as exc:
+        raise SystemExit(f"Unable to read API key file '{api_key_file}': {exc.strerror}.") from exc
+
+    if len(api_key) > MAX_API_KEY_FILE_BYTES:
+        raise SystemExit(
+            f"API key file '{api_key_file}' exceeds the {MAX_API_KEY_FILE_BYTES}-byte limit."
+        )
     if not api_key:
         raise SystemExit(f"API key file '{api_key_file}' is empty.")
 
@@ -163,6 +191,15 @@ def truncate_error_payload(payload: str, *, limit: int = MAX_ERROR_PAYLOAD_CHARS
     if len(payload) <= limit:
         return payload
     return f"{payload[:limit]}...[truncated]"
+
+
+def read_response_payload(response: Any) -> str:
+    payload = response.read(MAX_RESPONSE_PAYLOAD_CHARS + 1).decode("utf-8", errors="replace")
+    if len(payload) > MAX_RESPONSE_PAYLOAD_CHARS:
+        raise SystemExit(
+            f"Response payload exceeded the {MAX_RESPONSE_PAYLOAD_CHARS}-character limit."
+        )
+    return payload
 
 
 def build_url(base_url: str, path: str, params: dict[str, Any] | None = None) -> str:
@@ -212,7 +249,7 @@ def perform_request(
 
     try:
         with urllib.request.urlopen(request, timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS) as response:
-            payload = response.read().decode("utf-8")
+            payload = read_response_payload(response)
             return response.status, payload
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="replace")
@@ -254,7 +291,7 @@ def perform_public_json_request(url: str) -> Any:
     )
     try:
         with urllib.request.urlopen(request, timeout=DEFAULT_REQUEST_TIMEOUT_SECONDS) as response:
-            payload = response.read().decode("utf-8")
+            payload = read_response_payload(response)
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="replace")
         raise SystemExit(f"Holiday API HTTP {exc.code}: {truncate_error_payload(payload)}") from exc
@@ -300,12 +337,12 @@ def fetch_paginated_list(
         if not isinstance(payload, list):
             raise SystemExit(f"Expected list response for {path}, got {type(payload).__name__}.")
         items.extend(payload)
-        if max_items is not None and len(items) >= max_items:
-            return items[:max_items]
         if len(payload) < page_size:
             return items
+        if max_items is not None and len(items) >= max_items:
+            raise SystemExit(f"Exceeded max_items limit of {max_items} while fetching {path}.")
         if max_pages is not None and page >= max_pages:
-            return items
+            raise SystemExit(f"Exceeded max_pages limit of {max_pages} while fetching {path}.")
         page += 1
 
 
@@ -427,6 +464,8 @@ def find_workspace(
     )
     if not isinstance(workspaces, list):
         raise SystemExit("Expected /workspaces to return a list.")
+    if len(workspaces) > MAX_WORKSPACES:
+        raise SystemExit(f"Exceeded max_items limit of {MAX_WORKSPACES} while fetching /workspaces.")
 
     if workspace_id:
         for workspace in workspaces:
@@ -448,6 +487,8 @@ def find_workspace(
             api_key=api_key,
             base_url=base_url,
             path=f"/workspaces/{workspace['id']}/users",
+            max_pages=25,
+            max_items=MAX_USERS,
         )
         if any(user.get("name") == user_name for user in users):
             matching_workspaces.append(workspace)
@@ -475,6 +516,8 @@ def find_user(
         api_key=api_key,
         base_url=base_url,
         path=f"/workspaces/{workspace_id}/users",
+        max_pages=25,
+        max_items=MAX_USERS,
     )
     matches = [user for user in users if user.get("name") == user_name]
     if len(matches) == 1:
@@ -495,6 +538,8 @@ def find_project_by_name(
         api_key=api_key,
         base_url=base_url,
         path=f"/workspaces/{workspace_id}/projects",
+        max_pages=25,
+        max_items=MAX_PROJECTS,
     )
     matches = [project for project in projects if project.get("name") == project_name]
     if len(matches) == 1:
@@ -515,6 +560,8 @@ def fetch_tasks_for_project(
         api_key=api_key,
         base_url=base_url,
         path=f"/workspaces/{workspace_id}/projects/{project_id}/tasks",
+        max_pages=50,
+        max_items=MAX_TASKS,
     )
     return {task["id"]: task.get("name", "") for task in tasks if "id" in task}
 
@@ -558,6 +605,8 @@ def fetch_time_entries(
             "hydrated": "false",
         },
         page_size=500,
+        max_pages=200,
+        max_items=MAX_TIME_ENTRIES,
     )
 
 
@@ -744,17 +793,20 @@ def handle_balance_command(args: argparse.Namespace) -> int:
         user_name=args.user,
     )
     workspace_id = workspace["id"]
+
     user = find_user(
         api_key=api_key,
         base_url=base_url,
         workspace_id=workspace_id,
         user_name=args.user,
     )
+
     workspace_details = fetch_workspace_details(
         api_key=api_key,
         base_url=base_url,
         workspace_id=workspace_id,
     )
+
     timezone = get_timezone(workspace_details.get("timeZone") or workspace_details.get("workspaceSettings", {}).get("timeZone"))
 
     out_of_office_project = find_project_by_name(
@@ -763,6 +815,7 @@ def handle_balance_command(args: argparse.Namespace) -> int:
         workspace_id=workspace_id,
         project_name=args.out_of_office_project,
     )
+
     task_names: dict[str, str] = {}
     if out_of_office_project is not None:
         task_names = fetch_tasks_for_project(
@@ -781,7 +834,9 @@ def handle_balance_command(args: argparse.Namespace) -> int:
         end_date=end_date,
         timezone=timezone,
     )
+
     public_holidays = fetch_public_holidays(start_date, end_date)
+
     summary, warnings = compute_work_summary(
         entries=entries,
         schedule=schedule,
@@ -792,6 +847,7 @@ def handle_balance_command(args: argparse.Namespace) -> int:
         task_names=task_names,
         timezone=timezone,
     )
+
     print_work_summary(
         summary,
         warnings,
