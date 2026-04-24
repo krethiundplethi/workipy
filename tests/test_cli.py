@@ -1,4 +1,5 @@
 import unittest
+import urllib.error
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,16 +8,19 @@ from zoneinfo import ZoneInfo
 
 from workipy.cli import (
     DEFAULT_BASE_URL,
+    MAX_ERROR_PAYLOAD_CHARS,
     DEFAULT_REQUEST_TIMEOUT_SECONDS,
     PublicHoliday,
     WorkSchedule,
     build_parser,
     build_url,
     compute_work_summary,
+    fetch_paginated_list,
     parse_european_date,
     perform_public_json_request,
     perform_request,
     require_api_key,
+    truncate_error_payload,
     validate_clockify_base_url,
 )
 
@@ -43,7 +47,7 @@ class CliTests(unittest.TestCase):
             ]
         )
         self.assertEqual(args.user, "Max Testerman")
-        self.assertFalse(args.allow_costum_base_url)
+        self.assertFalse(args.allow_custom_base_url)
         self.assertIsNone(args.api_key_file)
 
     def test_require_api_key_reads_key_from_file(self) -> None:
@@ -67,7 +71,7 @@ class CliTests(unittest.TestCase):
 
     def test_validate_clockify_base_url_accepts_default_url(self) -> None:
         self.assertEqual(
-            validate_clockify_base_url(DEFAULT_BASE_URL, allow_costum_base_url=False),
+            validate_clockify_base_url(DEFAULT_BASE_URL, allow_custom_base_url=False),
             DEFAULT_BASE_URL,
         )
 
@@ -75,19 +79,19 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as exc:
             validate_clockify_base_url(
                 "https://example.com/api",
-                allow_costum_base_url=False,
+                allow_custom_base_url=False,
             )
         self.assertEqual(
             str(exc.exception),
             "Custom Clockify base URLs are disabled. Use "
-            "--allow-costum-base-url to override the default API endpoint.",
+            "--allow-custom-base-url to override the default API endpoint.",
         )
 
     def test_validate_clockify_base_url_accepts_custom_https_url_with_flag(self) -> None:
         self.assertEqual(
             validate_clockify_base_url(
                 "https://example.com/api/",
-                allow_costum_base_url=True,
+                allow_custom_base_url=True,
             ),
             "https://example.com/api",
         )
@@ -96,12 +100,20 @@ class CliTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as exc:
             validate_clockify_base_url(
                 "http://example.com/api",
-                allow_costum_base_url=True,
+                allow_custom_base_url=True,
             )
         self.assertEqual(str(exc.exception), "Clockify base URL must use HTTPS.")
 
     def test_parse_european_date(self) -> None:
         self.assertEqual(parse_european_date("31-01-2026"), date(2026, 1, 31))
+
+    def test_truncate_error_payload_caps_large_payloads(self) -> None:
+        payload = "x" * (MAX_ERROR_PAYLOAD_CHARS + 10)
+        truncated = truncate_error_payload(payload)
+        self.assertEqual(
+            truncated,
+            ("x" * MAX_ERROR_PAYLOAD_CHARS) + "...[truncated]",
+        )
 
     def test_perform_request_uses_timeout(self) -> None:
         response = mock.MagicMock()
@@ -118,6 +130,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(payload, '{"ok": true}')
         self.assertEqual(urlopen.call_args.kwargs["timeout"], DEFAULT_REQUEST_TIMEOUT_SECONDS)
 
+    def test_perform_request_truncates_http_error_payload(self) -> None:
+        payload = ("x" * (MAX_ERROR_PAYLOAD_CHARS + 10)).encode("utf-8")
+        response = mock.MagicMock()
+        response.read.return_value = payload
+        http_error = urllib.error.HTTPError(
+            url="https://api.clockify.me/api/v1/workspaces",
+            code=500,
+            msg="Internal Server Error",
+            hdrs=None,
+            fp=response,
+        )
+        with mock.patch("workipy.cli.urllib.request.urlopen", side_effect=http_error):
+            with self.assertRaises(SystemExit) as exc:
+                perform_request(
+                    api_key="secret",
+                    base_url=DEFAULT_BASE_URL,
+                    method="GET",
+                    path="/workspaces",
+                )
+        self.assertEqual(
+            str(exc.exception),
+            f"HTTP 500: {('x' * MAX_ERROR_PAYLOAD_CHARS)}...[truncated]",
+        )
+
     def test_perform_public_json_request_uses_timeout(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = b'{"ok": true}'
@@ -125,6 +161,63 @@ class CliTests(unittest.TestCase):
             payload = perform_public_json_request("https://example.com/holidays")
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(urlopen.call_args.kwargs["timeout"], DEFAULT_REQUEST_TIMEOUT_SECONDS)
+
+    def test_fetch_paginated_list_stops_at_max_pages(self) -> None:
+        with mock.patch(
+            "workipy.cli.perform_json_request",
+            side_effect=[
+                [{"id": "1"}, {"id": "2"}],
+                [{"id": "3"}, {"id": "4"}],
+                [{"id": "5"}],
+            ],
+        ) as perform_json_request:
+            items = fetch_paginated_list(
+                api_key="secret",
+                base_url=DEFAULT_BASE_URL,
+                path="/users",
+                page_size=2,
+                max_pages=2,
+            )
+        self.assertEqual(items, [{"id": "1"}, {"id": "2"}, {"id": "3"}, {"id": "4"}])
+        self.assertEqual(perform_json_request.call_count, 2)
+
+    def test_fetch_paginated_list_stops_at_max_items(self) -> None:
+        with mock.patch(
+            "workipy.cli.perform_json_request",
+            side_effect=[
+                [{"id": "1"}, {"id": "2"}],
+                [{"id": "3"}, {"id": "4"}],
+            ],
+        ) as perform_json_request:
+            items = fetch_paginated_list(
+                api_key="secret",
+                base_url=DEFAULT_BASE_URL,
+                path="/users",
+                page_size=2,
+                max_items=3,
+            )
+        self.assertEqual(items, [{"id": "1"}, {"id": "2"}, {"id": "3"}])
+        self.assertEqual(perform_json_request.call_count, 2)
+
+    def test_fetch_paginated_list_rejects_invalid_max_pages(self) -> None:
+        with self.assertRaises(SystemExit) as exc:
+            fetch_paginated_list(
+                api_key="secret",
+                base_url=DEFAULT_BASE_URL,
+                path="/users",
+                max_pages=0,
+            )
+        self.assertEqual(str(exc.exception), "max_pages must be at least 1.")
+
+    def test_fetch_paginated_list_rejects_invalid_max_items(self) -> None:
+        with self.assertRaises(SystemExit) as exc:
+            fetch_paginated_list(
+                api_key="secret",
+                base_url=DEFAULT_BASE_URL,
+                path="/users",
+                max_items=0,
+            )
+        self.assertEqual(str(exc.exception), "max_items must be at least 1.")
 
     def test_summary_uses_passed_public_holidays_for_target_hours(self) -> None:
         schedule = WorkSchedule(5, 5, 5, 5, 0)

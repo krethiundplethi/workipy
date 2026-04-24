@@ -23,6 +23,7 @@ SICK_LEAVE_TASK_NAME = "Sick-Leave"
 SPECIAL_LEAVE_TASK_NAME = "Special Leave"
 VACATION_TASK_NAME = "Vacation"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 30
+MAX_ERROR_PAYLOAD_CHARS = 4096
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--allow-costum-base-url",
+        "--allow-custom-base-url",
         action="store_true",
         help="Allow a custom Clockify base URL. Only HTTPS URLs are accepted.",
     )
@@ -134,7 +135,7 @@ def require_api_key(api_key_file: str | None) -> str:
     return api_key
 
 
-def validate_clockify_base_url(base_url: str, *, allow_costum_base_url: bool) -> str:
+def validate_clockify_base_url(base_url: str, *, allow_custom_base_url: bool) -> str:
     normalized_base_url = base_url.rstrip("/")
     parsed = urllib.parse.urlparse(normalized_base_url)
 
@@ -142,10 +143,10 @@ def validate_clockify_base_url(base_url: str, *, allow_costum_base_url: bool) ->
         raise SystemExit("Clockify base URL must use HTTPS.")
     if not parsed.netloc:
         raise SystemExit("Clockify base URL must be an absolute HTTPS URL.")
-    if not allow_costum_base_url and normalized_base_url != DEFAULT_BASE_URL:
+    if not allow_custom_base_url and normalized_base_url != DEFAULT_BASE_URL:
         raise SystemExit(
             "Custom Clockify base URLs are disabled. Use "
-            "--allow-costum-base-url to override the default API endpoint."
+            "--allow-custom-base-url to override the default API endpoint."
         )
 
     return normalized_base_url
@@ -156,6 +157,12 @@ def parse_european_date(raw_value: str) -> date:
         return datetime.strptime(raw_value, "%d-%m-%Y").date()
     except ValueError as exc:
         raise SystemExit(f"Invalid date '{raw_value}'. Expected DD-MM-YYYY.") from exc
+
+
+def truncate_error_payload(payload: str, *, limit: int = MAX_ERROR_PAYLOAD_CHARS) -> str:
+    if len(payload) <= limit:
+        return payload
+    return f"{payload[:limit]}...[truncated]"
 
 
 def build_url(base_url: str, path: str, params: dict[str, Any] | None = None) -> str:
@@ -209,7 +216,7 @@ def perform_request(
             return response.status, payload
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"HTTP {exc.code}: {payload}") from exc
+        raise SystemExit(f"HTTP {exc.code}: {truncate_error_payload(payload)}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"Request failed: {exc.reason}") from exc
 
@@ -234,7 +241,9 @@ def perform_json_request(
     try:
         return json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"Expected JSON response for {path}, got: {payload}") from exc
+        raise SystemExit(
+            f"Expected JSON response for {path}, got: {truncate_error_payload(payload)}"
+        ) from exc
 
 
 def perform_public_json_request(url: str) -> Any:
@@ -248,14 +257,16 @@ def perform_public_json_request(url: str) -> Any:
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         payload = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"Holiday API HTTP {exc.code}: {payload}") from exc
+        raise SystemExit(f"Holiday API HTTP {exc.code}: {truncate_error_payload(payload)}") from exc
     except urllib.error.URLError as exc:
         raise SystemExit(f"Holiday API request failed: {exc.reason}") from exc
 
     try:
         return json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"Holiday API returned invalid JSON: {payload}") from exc
+        raise SystemExit(
+            f"Holiday API returned invalid JSON: {truncate_error_payload(payload)}"
+        ) from exc
 
 
 def fetch_paginated_list(
@@ -265,7 +276,14 @@ def fetch_paginated_list(
     path: str,
     params: dict[str, Any] | None = None,
     page_size: int = 200,
+    max_pages: int | None = None,
+    max_items: int | None = None,
 ) -> list[dict[str, Any]]:
+    if max_pages is not None and max_pages < 1:
+        raise SystemExit("max_pages must be at least 1.")
+    if max_items is not None and max_items < 1:
+        raise SystemExit("max_items must be at least 1.")
+
     page = 1
     items: list[dict[str, Any]] = []
     while True:
@@ -282,7 +300,11 @@ def fetch_paginated_list(
         if not isinstance(payload, list):
             raise SystemExit(f"Expected list response for {path}, got {type(payload).__name__}.")
         items.extend(payload)
+        if max_items is not None and len(items) >= max_items:
+            return items[:max_items]
         if len(payload) < page_size:
+            return items
+        if max_pages is not None and page >= max_pages:
             return items
         page += 1
 
@@ -699,7 +721,7 @@ def handle_balance_command(args: argparse.Namespace) -> int:
     api_key = require_api_key(args.api_key_file)
     base_url = validate_clockify_base_url(
         args.base_url,
-        allow_costum_base_url=args.allow_costum_base_url,
+        allow_custom_base_url=args.allow_custom_base_url,
     )
     start_date = parse_european_date(args.start)
     end_date = parse_european_date(args.end)
