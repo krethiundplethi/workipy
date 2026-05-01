@@ -167,7 +167,7 @@ class CliTests(unittest.TestCase):
         response = mock.MagicMock()
         response.__enter__.return_value.status = 200
         response.__enter__.return_value.read.return_value = b'{"ok": true}'
-        with mock.patch("workipy.cli.urllib.request.urlopen", return_value=response) as urlopen:
+        with mock.patch("workipy.http.urllib.request.urlopen", return_value=response) as urlopen:
             status, payload = perform_request(
                 api_key="secret",
                 base_url=DEFAULT_BASE_URL,
@@ -189,7 +189,7 @@ class CliTests(unittest.TestCase):
             hdrs=None,
             fp=response,
         )
-        with mock.patch("workipy.cli.urllib.request.urlopen", side_effect=http_error):
+        with mock.patch("workipy.http.urllib.request.urlopen", side_effect=http_error):
             with self.assertRaises(SystemExit) as exc:
                 perform_request(
                     api_key="secret",
@@ -205,14 +205,14 @@ class CliTests(unittest.TestCase):
     def test_perform_public_json_request_uses_timeout(self) -> None:
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = b'{"ok": true}'
-        with mock.patch("workipy.cli.urllib.request.urlopen", return_value=response) as urlopen:
+        with mock.patch("workipy.http.urllib.request.urlopen", return_value=response) as urlopen:
             payload = perform_public_json_request("https://example.com/holidays")
         self.assertEqual(payload, {"ok": True})
         self.assertEqual(urlopen.call_args.kwargs["timeout"], DEFAULT_REQUEST_TIMEOUT_SECONDS)
 
     def test_fetch_paginated_list_stops_at_max_pages(self) -> None:
         with mock.patch(
-            "workipy.cli.perform_json_request",
+            "workipy.clockify.perform_json_request",
             side_effect=[
                 [{"id": "1"}, {"id": "2"}],
                 [{"id": "3"}, {"id": "4"}],
@@ -231,7 +231,7 @@ class CliTests(unittest.TestCase):
 
     def test_fetch_paginated_list_returns_when_last_page_is_short(self) -> None:
         with mock.patch(
-            "workipy.cli.perform_json_request",
+            "workipy.clockify.perform_json_request",
             side_effect=[
                 [{"id": "1"}, {"id": "2"}],
                 [{"id": "3"}],
@@ -248,7 +248,7 @@ class CliTests(unittest.TestCase):
 
     def test_fetch_paginated_list_rejects_when_max_items_reached_and_more_pages_possible(self) -> None:
         with mock.patch(
-            "workipy.cli.perform_json_request",
+            "workipy.clockify.perform_json_request",
             side_effect=[
                 [{"id": "1"}, {"id": "2"}],
                 [{"id": "3"}, {"id": "4"}],
@@ -285,7 +285,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(str(exc.exception), "max_items must be at least 1.")
 
     def test_find_user_uses_pagination_limits(self) -> None:
-        with mock.patch("workipy.cli.fetch_paginated_list", return_value=[{"name": "Max", "id": "u1"}]) as fetch:
+        with mock.patch(
+            "workipy.clockify.ClockifyClient.fetch_paginated_list",
+            return_value=[{"name": "Max", "id": "u1"}],
+        ) as fetch:
             user = find_user(
                 api_key="secret",
                 base_url=DEFAULT_BASE_URL,
@@ -298,7 +301,7 @@ class CliTests(unittest.TestCase):
 
     def test_find_project_by_name_uses_pagination_limits(self) -> None:
         with mock.patch(
-            "workipy.cli.fetch_paginated_list",
+            "workipy.clockify.ClockifyClient.fetch_paginated_list",
             return_value=[{"name": "Out of office", "id": "p1"}],
         ) as fetch:
             project = find_project_by_name(
@@ -313,7 +316,7 @@ class CliTests(unittest.TestCase):
 
     def test_fetch_tasks_for_project_uses_pagination_limits(self) -> None:
         with mock.patch(
-            "workipy.cli.fetch_paginated_list",
+            "workipy.clockify.ClockifyClient.fetch_paginated_list",
             return_value=[{"name": "Vacation", "id": "t1"}],
         ) as fetch:
             tasks = fetch_tasks_for_project(
@@ -327,7 +330,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(fetch.call_args.kwargs["max_items"], MAX_TASKS)
 
     def test_fetch_time_entries_uses_pagination_limits(self) -> None:
-        with mock.patch("workipy.cli.fetch_paginated_list", return_value=[]) as fetch:
+        with mock.patch("workipy.clockify.ClockifyClient.fetch_paginated_list", return_value=[]) as fetch:
             entries = fetch_time_entries(
                 api_key="secret",
                 base_url=DEFAULT_BASE_URL,
